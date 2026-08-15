@@ -1,0 +1,9 @@
+# Every authority change requires the dedicated release-authority owners.
+* @code-CogLearn/foundation-release-owners
+
+/.github/ @code-CogLearn/foundation-release-owners
+/contracts/ @code-CogLearn/foundation-release-owners
+/docs/ @code-CogLearn/foundation-release-owners
+/policy/ @code-CogLearn/foundation-release-owners
+/scripts/ @code-CogLearn/foundation-release-owners
+/tests/ @code-CogLearn/foundation-release-owners

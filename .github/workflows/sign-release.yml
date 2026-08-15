@@ -1,0 +1,149 @@
+name: Sign foundation release candidate
+
+run-name: >-
+  Revalidate ${{ github.event.client_payload.target_release_sha }}
+  from ${{ github.event.client_payload.prior_release_sha }}
+
+on:
+  repository_dispatch:
+    types: [foundation-release-candidate]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundation-release-${{ github.event.client_payload.target_release_sha }}
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    name: revalidate and sign
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: foundation-release
+    steps:
+      - name: Check out signing authority
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Validate untrusted wakeup shape
+        env:
+          WAKEUP_TARGET_SHA: ${{ github.event.client_payload.target_release_sha }}
+          WAKEUP_PREDECESSOR_SHA: ${{ github.event.client_payload.prior_release_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$WAKEUP_TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WAKEUP_PREDECESSOR_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WAKEUP_TARGET_SHA" != "$WAKEUP_PREDECESSOR_SHA" ]]
+
+      - name: Mint source read token
+        id: source-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+        with:
+          app-id: ${{ secrets.FOUNDATION_SOURCE_APP_ID }}
+          private-key: ${{ secrets.FOUNDATION_SOURCE_APP_PRIVATE_KEY }}
+          owner: code-CogLearn
+          repositories: coglearn-platform
+          permission-actions: read
+          permission-contents: read
+          permission-checks: read
+
+      - name: Revalidate canonical GitHub facts
+        env:
+          SOURCE_GITHUB_TOKEN: ${{ steps.source-token.outputs.token }}
+          WAKEUP_TARGET_SHA: ${{ github.event.client_payload.target_release_sha }}
+          WAKEUP_PREDECESSOR_SHA: ${{ github.event.client_payload.prior_release_sha }}
+        run: >-
+          scripts/collect-source-observation.sh
+          policy/source-attestations.json
+          candidate-observation.json
+
+      - name: Check out exact canonical source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: code-CogLearn/coglearn-platform
+          ref: ${{ github.event.client_payload.target_release_sha }}
+          token: ${{ steps.source-token.outputs.token }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: canonical-source
+
+      - name: Build exact candidate bundle
+        env:
+          EVIDENCE_ID: authority-run:${{ github.run_id }}:${{ github.run_attempt }}
+        run: >-
+          python3 scripts/build_candidate.py
+          --source canonical-source
+          --observation candidate-observation.json
+          --output candidate
+          --evidence-id "$EVIDENCE_ID"
+
+      - name: Verify unsigned candidate
+        run: >-
+          python3 scripts/verify_candidate.py
+          --candidate candidate
+          --observation candidate-observation.json
+          --policy policy/source-attestations.json
+
+      - name: Revalidate immediately before signing
+        env:
+          SOURCE_GITHUB_TOKEN: ${{ steps.source-token.outputs.token }}
+          WAKEUP_TARGET_SHA: ${{ github.event.client_payload.target_release_sha }}
+          WAKEUP_PREDECESSOR_SHA: ${{ github.event.client_payload.prior_release_sha }}
+        run: |
+          set -euo pipefail
+          scripts/collect-source-observation.sh \
+            policy/source-attestations.json candidate-observation-before-sign.json
+          jq -S 'del(.observed_at)' candidate-observation.json >"$RUNNER_TEMP/first.json"
+          jq -S 'del(.observed_at)' candidate-observation-before-sign.json >"$RUNNER_TEMP/before.json"
+          cmp "$RUNNER_TEMP/first.json" "$RUNNER_TEMP/before.json"
+
+      - name: Sign exact release evidence
+        env:
+          FOUNDATION_RELEASE_SSH_PRIVATE_KEY: ${{ secrets.FOUNDATION_RELEASE_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          signing_tmp="$(mktemp -d "$RUNNER_TEMP/foundation-sign.XXXXXX")"
+          eval "$(ssh-agent -s)" >/dev/null
+          cleanup() {
+            ssh-add -D >/dev/null 2>&1 || true
+            ssh-agent -k >/dev/null 2>&1 || true
+            rm -rf -- "$signing_tmp"
+          }
+          trap cleanup EXIT
+          printf '%s\n' "$FOUNDATION_RELEASE_SSH_PRIVATE_KEY" | ssh-add - >/dev/null
+          unset FOUNDATION_RELEASE_SSH_PRIVATE_KEY
+          ssh-add -L >"$signing_tmp/signer.pub"
+          [[ "$(wc -l <"$signing_tmp/signer.pub")" -eq 1 ]]
+          ssh-keygen -Y sign \
+            -f "$signing_tmp/signer.pub" \
+            -n aiedu-foundation-target \
+            candidate/RELEASE_EVIDENCE.json
+          mv candidate/RELEASE_EVIDENCE.json.sig candidate/RELEASE_EVIDENCE.sig
+
+      - name: Revalidate signed candidate and canonical ref
+        env:
+          SOURCE_GITHUB_TOKEN: ${{ steps.source-token.outputs.token }}
+          WAKEUP_TARGET_SHA: ${{ github.event.client_payload.target_release_sha }}
+          WAKEUP_PREDECESSOR_SHA: ${{ github.event.client_payload.prior_release_sha }}
+        run: |
+          set -euo pipefail
+          scripts/collect-source-observation.sh \
+            policy/source-attestations.json candidate-observation-after-sign.json
+          jq -S 'del(.observed_at)' candidate-observation.json >"$RUNNER_TEMP/first.json"
+          jq -S 'del(.observed_at)' candidate-observation-after-sign.json >"$RUNNER_TEMP/after.json"
+          cmp "$RUNNER_TEMP/first.json" "$RUNNER_TEMP/after.json"
+          python3 scripts/verify_candidate.py \
+            --candidate candidate \
+            --observation candidate-observation-after-sign.json \
+            --policy policy/source-attestations.json \
+            --require-signature
+
+      - name: Publish private candidate artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: foundation-release-candidate-${{ github.event.client_payload.target_release_sha }}
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 1

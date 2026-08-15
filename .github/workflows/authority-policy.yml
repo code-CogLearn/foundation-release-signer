@@ -1,0 +1,34 @@
+name: Authority policy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out authority policy
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run authority tests
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Parse workflow YAML
+        run: >-
+          ruby -e 'require "yaml";
+          Dir[".github/workflows/*.{yml,yaml}"].sort.each {
+            |path| YAML.safe_load_file(path, aliases: true); puts "parsed #{path}"
+          }'
+
+      - name: Check whitespace
+        run: git diff --check

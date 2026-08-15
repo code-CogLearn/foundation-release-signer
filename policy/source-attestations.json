@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "repository": "code-CogLearn/coglearn-platform",
+  "canonical_ref": "refs/heads/main",
+  "ci": {
+    "check_name": "Foundation Release CI",
+    "app_slug": "github-actions",
+    "workflow_path": ".github/workflows/foundation-release-ci.yml"
+  },
+  "final_review": {
+    "check_name": "Foundation Final Review",
+    "app_slug": "coglearn-foundation-review"
+  },
+  "signature": {
+    "identity": "foundation-release",
+    "namespace": "aiedu-foundation-target"
+  }
+}
